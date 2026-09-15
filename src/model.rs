@@ -9,6 +9,7 @@ use std::time::SystemTime;
 pub struct Link {
     pub uuid: String,
     pub destination: String,
+    pub user_agent: Option<String>,
 }
 
 impl Link {
@@ -40,17 +41,21 @@ impl Link {
         Ok(Link {
             uuid: rec.UUID,
             destination: rec.DESTINATION,
+            user_agent: rec.user_agent,
         })
     }
     pub async fn update(link: Link, pool: web::Data<Pool<Sqlite>>) -> Result<Link, sqlx::Error> {
         let mut tx = pool.begin().await?;
         let now = <SystemTime as Into<DateTime<Utc>>>::into(SystemTime::now()).to_rfc3339();
-        sqlx::query("UPDATE links SET destination = $2, last_used = $3 WHERE uuid = $1;")
-            .bind(&link.uuid)
-            .bind(&link.destination)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE links SET destination = $2, last_used = $3, user_agent = $4 WHERE uuid = $1;",
+        )
+        .bind(&link.uuid)
+        .bind(&link.destination)
+        .bind(&now)
+        .bind(&link.user_agent)
+        .execute(&mut *tx)
+        .await?;
         println!("{} update uuid {}", now, link.uuid);
         tx.commit().await?;
 
@@ -59,12 +64,15 @@ impl Link {
     pub async fn create(link: Link, pool: web::Data<Pool<Sqlite>>) -> Result<Link, sqlx::Error> {
         let mut tx = pool.begin().await?;
         let now = <SystemTime as Into<DateTime<Utc>>>::into(SystemTime::now()).to_rfc3339();
-        sqlx::query("INSERT INTO links (uuid, destination, last_used) VALUES ($1, $2, $3);")
-            .bind(&link.uuid)
-            .bind(&link.destination)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO links (uuid, destination, last_used, user_agent) VALUES ($1, $2, $3, $4);",
+        )
+        .bind(&link.uuid)
+        .bind(&link.destination)
+        .bind(&now)
+        .bind(&link.user_agent)
+        .execute(&mut *tx)
+        .await?;
         println!("{} create uuid {}", now, link.uuid);
         tx.commit().await?;
 

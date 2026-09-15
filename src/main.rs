@@ -1,6 +1,6 @@
 use actix_web::http::StatusCode;
 use actix_web::web::Data;
-use actix_web::{error, web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder, Result};
+use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, Responder, Result, error, web};
 use sqlx::{Pool, Sqlite, SqlitePool};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
@@ -19,6 +19,40 @@ use model::Link;
 use chrono::Utc;
 const REDIRECT_TIMEOUT_S: i32 = 2;
 
+// Curated, manually-updated presets -- no crate on crates.io keeps an actually
+// up-to-date user-agent list (the ones that exist are either abandoned or
+// fetch a "live" list over the network at request time).
+const USER_AGENT_PRESETS: &[(&str, &str)] = &[
+    (
+        "Chrome (Windows)",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    ),
+    (
+        "Chrome (macOS)",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    ),
+    (
+        "Chrome (Android)",
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+    ),
+    (
+        "Safari (macOS)",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+    ),
+    (
+        "Safari (iOS)",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+    ),
+    (
+        "Firefox (Windows)",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    ),
+    (
+        "Edge (Windows)",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+    ),
+];
+
 #[derive(Clone)]
 struct Config {
     root: String,
@@ -30,17 +64,25 @@ async fn make_ics_request(req: HttpRequest, db_pool: web::Data<Pool<Sqlite>>) ->
     println!("{now} serving ics request");
     match Uuid::parse_str(id) {
         Ok(uuid) => match Link::find_by_uuid(uuid.to_string(), db_pool).await {
-            Ok(link) => match reqwest::get(link.destination).await {
-                Ok(r) => match r.text().await {
-                    Ok(res) => HttpResponse::Ok().content_type("text/calendar").body(res),
+            Ok(link) => {
+                let client = reqwest::Client::new();
+                let mut request = client.get(&link.destination);
+                if let Some(ua) = &link.user_agent
+                    && !ua.is_empty()
+                {
+                    request = request.header(reqwest::header::USER_AGENT, ua);
+                }
+                match request.send().await {
+                    Ok(r) => match r.text().await {
+                        Ok(res) => HttpResponse::Ok().content_type("text/calendar").body(res),
+                        Err(err) => HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(err.to_string()),
+                    },
                     Err(err) => {
                         HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR).body(err.to_string())
                     }
-                },
-                Err(err) => {
-                    HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR).body(err.to_string())
                 }
-            },
+            }
             Err(_) => HttpResponse::build(StatusCode::NOT_FOUND).finish(),
         },
         Err(_) => HttpResponse::build(StatusCode::BAD_REQUEST).finish(),
@@ -82,6 +124,8 @@ async fn edit_page(
                     ctx.insert("link", &link.destination);
                     ctx.insert("uuid", &link.uuid);
                     ctx.insert("root", &conf.root);
+                    ctx.insert("user_agent", &link.user_agent.unwrap_or_default());
+                    ctx.insert("user_agent_presets", USER_AGENT_PRESETS);
                     let s = tmpl
                         .render("edit.html", &ctx)
                         .map_err(|_| error::ErrorInternalServerError("Template error"))?;
@@ -209,9 +253,11 @@ async fn edit_process(
 
             match Uuid::parse_str(uuid_str) {
                 Ok(uuid) => {
+                    let user_agent = query.get("user_agent").filter(|ua| !ua.is_empty()).cloned();
                     let link = Link {
                         uuid: uuid.to_string(),
                         destination: destination.to_string(),
+                        user_agent,
                     };
                     match Link::update(link, db_pool).await {
                         Ok(_) => redirect_to_edit_page(
@@ -280,6 +326,7 @@ async fn index_process(
                 let insert_link = Link {
                     uuid: uuid.to_string(),
                     destination: destination.to_string(),
+                    user_agent: None,
                 };
 
                 match Link::create(insert_link, db_pool).await {
@@ -484,6 +531,7 @@ mod tests {
         let test_link = Link {
             uuid: test_uuid.clone(),
             destination: "http://calendar.example/calendar.ics".to_string(),
+            user_agent: None,
         };
 
         Link::create(test_link, web::Data::new(pool.clone()))
@@ -513,6 +561,7 @@ mod tests {
         let test_link = Link {
             uuid: test_uuid.to_string(),
             destination: destination.clone(),
+            user_agent: None,
         };
 
         Link::create(test_link, web::Data::new(pool.clone()))
@@ -572,6 +621,7 @@ mod tests {
         let test_link = Link {
             uuid: test_uuid.to_string(),
             destination: "https://example.com/calendar.ics".to_string(),
+            user_agent: None,
         };
 
         Link::create(test_link, web::Data::new(pool.clone()))
@@ -632,6 +682,7 @@ mod tests {
         let test_link = Link {
             uuid: test_uuid.to_string(),
             destination: "https://example.com/calendar.ics".to_string(),
+            user_agent: None,
         };
 
         Link::create(test_link, web::Data::new(pool.clone()))
@@ -655,6 +706,7 @@ mod tests {
         let test_link = Link {
             uuid: test_uuid.to_string(),
             destination: "https://example.com/calendar.ics".to_string(),
+            user_agent: None,
         };
 
         Link::create(test_link, web::Data::new(pool.clone()))
@@ -701,6 +753,7 @@ mod tests {
         let test_link = Link {
             uuid: test_uuid.clone(),
             destination: format!("{}/calendar.ics", mock_server.url()),
+            user_agent: None,
         };
 
         Link::create(test_link, web::Data::new(pool.clone()))
@@ -723,6 +776,47 @@ mod tests {
 
         let body = test::read_body(resp).await;
         assert_eq!(body, calendar_data);
+        mock.assert();
+    }
+
+    #[actix_web::test]
+    async fn test_proxy_request_forwards_custom_user_agent() {
+        let pool = setup_test_db().await;
+
+        let mut mock_server = mockito::Server::new_async().await;
+        let calendar_data = "BEGIN:VCALENDAR\nEND:VCALENDAR";
+        let mock = mock_server
+            .mock("GET", "/calendar.ics")
+            .match_header("user-agent", "SpecialCalendarClient/1.0")
+            .with_status(200)
+            .with_header("content-type", "text/calendar")
+            .with_body(calendar_data)
+            .create();
+
+        let test_uuid = Uuid::new_v4().to_string();
+        let test_link = Link {
+            uuid: test_uuid.clone(),
+            destination: format!("{}/calendar.ics", mock_server.url()),
+            user_agent: Some("SpecialCalendarClient/1.0".to_string()),
+        };
+
+        Link::create(test_link, web::Data::new(pool.clone()))
+            .await
+            .expect("Failed to create test link");
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .route("/{id}/events.ics", web::get().to(make_ics_request)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/{}/events.ics", test_uuid))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
         mock.assert();
     }
 }

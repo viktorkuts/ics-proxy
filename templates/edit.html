@@ -28,7 +28,21 @@ You can simply copy and past this link into any calendar application.
         <input name="uuid" type="hidden" value="{{ uuid }}">
         <div class="input-group input-group-sm mb-3">
             <input class="form-control" name="link" type="text" value="{{ link }}">
-            <input class="btn btn-outline-secondary" value="Replace Link" name="replace" type="submit">
+        </div>
+        <label for="user_agent_select" class="form-label">User-Agent sent to this calendar (leave "No override" unless the calendar needs a specific browser to work)</label>
+        <div class="input-group input-group-sm mb-3">
+            <select id="user_agent_select" class="form-select"
+                onchange="document.getElementById('user_agent').value = this.value">
+                <option value="">No override / custom (edit field below)</option>
+                {% for preset in user_agent_presets %}
+                <option value="{{ preset.1 }}" {% if preset.1==user_agent %}selected{% endif %}>{{ preset.0 }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="input-group input-group-sm mb-3">
+            <input class="form-control" id="user_agent" name="user_agent" type="text" value="{{ user_agent }}"
+                placeholder="leave empty to send no User-Agent header">
+            <input class="btn btn-outline-secondary" value="Save" name="replace" type="submit">
         </div>
     </form>
     <hr class="my-4">
